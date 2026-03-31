@@ -224,14 +224,15 @@ class annulus(object):
 
         # Return the requested values.
         returns = ['percentiles'] if returns is None else returns
-        returns = [r.lower() for r in np.atleast_1d(returns)]
-        if 'none' in returns:
+        returns_keys = [r.lower() for r in np.atleast_1d(returns)]
+        if 'none' in returns_keys:
             return None
-        if 'percentiles' in returns:
-            idx = returns.index('percentiles')
+        returns = list(returns_keys)
+        if 'percentiles' in returns_keys:
+            idx = returns_keys.index('percentiles')
             returns[idx] = np.percentile(samples, [16, 50, 84], axis=0).T
-        if 'samples' in returns:
-            idx = returns.index('samples')
+        if 'samples' in returns_keys:
+            idx = returns_keys.index('samples')
             returns[idx] = samples
         return returns[0] if len(returns) == 1 else returns
 

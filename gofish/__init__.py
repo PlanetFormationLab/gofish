@@ -2,5 +2,5 @@
 
 from .gofish import imagecube
 
-__version__ = '1.6.7'
+__version__ = '1.6.14'
 __all__ = ["imagecube"]
