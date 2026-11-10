@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
+
+# `np.trapz` was removed in NumPy 2.0 in favour of `np.trapezoid`.
+_trapz = getattr(np, 'trapezoid', None) or np.trapz
 import matplotlib.pyplot as plt
 from scipy.stats import binned_statistic
 from scipy.optimize import curve_fit
@@ -624,7 +627,7 @@ class annulus(object):
             else:
                 w = np.ones(x.size)
             mask = (x - x0) / dx <= 1.0
-            SNR = np.trapz((y * w)[mask], x=x[mask])
+            SNR = _trapz((y * w)[mask], x=x[mask])
         return -SNR
 
     @staticmethod
@@ -642,7 +645,7 @@ class annulus(object):
             raise ValueError("Mismatch in array shapes.")
         Tb = np.max(y)
         x0 = x[y.argmax()]
-        dV = np.trapz(y, x) / Tb / np.sqrt(2. * np.pi)
+        dV = _trapz(y, x) / Tb / np.sqrt(2. * np.pi)
         return x0, dV, Tb
 
     @staticmethod
@@ -738,7 +741,8 @@ class annulus(object):
                          for dv, spectra in zip(vlos, self.spectra)])
 
     def deprojected_spectrum(self, vrot, vrad=0.0, resample=False,
-                             scatter=False, empirical_uncertainty=True):
+                             scatter=False, empirical_uncertainty=True,
+                             statistic='mean'):
         """
         Returns ``(x, y[, dy])`` of the collapsed and deprojected spectrum
         using the provided velocities to deproject the data. Different methods
@@ -771,6 +775,9 @@ class annulus(object):
                 ``False`` then return the standard error on the mean (i.e., 
                 divide the bin standard deviation by the square root of the bin
                 count). This generally results in an underestimated noise.
+            statistic (optional[str]): Statistic used to combine the shifted
+                pixels in each velocity bin, either ``'mean'`` (default) or
+                ``'median'``. Only used if ``resample`` is not ``False``.
 
         Returns:
             A deprojected spectrum, resampled using the provided method.
@@ -783,7 +790,8 @@ class annulus(object):
                                       spnts=spnts,
                                       resample=resample,
                                       scatter=scatter,
-                                      empirical_uncertainty=empirical_uncertainty)
+                                      empirical_uncertainty=empirical_uncertainty,
+                                      statistic=statistic)
 
     def _line_centroids(self, method='max', spectra=None, velax=None):
         """
@@ -835,7 +843,8 @@ class annulus(object):
         return vpnts[idxs], spnts[idxs]
 
     def _resample_spectra(self, vpnts, spnts, resample=False, scatter=False,
-                          empirical_uncertainty=True, method='binning'):
+                          empirical_uncertainty=True, method='binning',
+                          statistic='mean'):
         """
         Resample the spectra to a given velocity axis. The scatter is estimated
         as the standard deviation of the bin (note that this is not rescaled by
@@ -858,15 +867,20 @@ class annulus(object):
                 count). This generally results in an underestimated noise.
             method (optional[str]): Method to resample the spectra. Either
                 `'binning'` or `'smoothing'`. Still TODO!!
-            
+            statistic (optional[str]): Statistic used to combine the points in
+                each velocity bin, either ``'mean'`` (default) or
+                ``'median'``.
+
         Returns:
             x (ndarray): Velocity bin centers.
-            y (ndarray): Mean of the bin.
+            y (ndarray): Mean (or median) of the bin.
             dy (ndarray/None): Standard error on the mean of the bin.
         """
 
         if method != 'binning':
             raise NotImplementedError("Hold your horses!")
+        if statistic not in ('mean', 'median'):
+            raise ValueError("`statistic` must be 'mean' or 'median'.")
 
         # If no resampling is requested, just return the raw points.
 
@@ -893,7 +907,7 @@ class annulus(object):
             raise TypeError("Resample must be a boolean, int, float or array.")
         idxs = np.isfinite(spnts)
         vpnts, spnts = vpnts[idxs], spnts[idxs]
-        y = binned_statistic(vpnts, spnts, statistic='mean', bins=bins)[0]
+        y = binned_statistic(vpnts, spnts, statistic=statistic, bins=bins)[0]
         x = np.average([bins[1:], bins[:-1]], axis=0)
         if not scatter:
             return x, y
