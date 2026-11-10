@@ -1,6 +1,9 @@
 import os
 import warnings
 import numpy as np
+
+# `np.trapz` was removed in NumPy 2.0 in favour of `np.trapezoid`.
+_trapz = getattr(np, 'trapezoid', None) or np.trapz
 from astropy.io import fits
 import scipy.constants as sc
 from .annulus import annulus
@@ -509,7 +512,7 @@ class imagecube(object):
             spectral_correlation = 0.0
         else:
             _N_collapsed = np.sum(_N, axis=(0, 1))
-            _N_collapsed /= np.trapz(_N_collapsed, dx=self.chan)
+            _N_collapsed /= _trapz(_N_collapsed, dx=self.chan)
             _N_collapsed /= _N_collapsed.max()
 
             _N_cumsum = np.cumsum(_N_collapsed)
@@ -1141,7 +1144,7 @@ class imagecube(object):
         beam_spacing=False, r_min=None, r_max=None, PA_min=None, PA_max=None,
         exclude_PA=None, abs_PA=False, mask_frame='disk', mask=None,
         unit='Jy/beam', shadowed=False, skip_empty_annuli=True,
-        empirical_uncertainty=False, vrad_func=None):
+        empirical_uncertainty=False, vrad_func=None, statistic='mean'):
         """
         Return shifted and stacked spectra, over a given spatial region in the
         disk. The averaged spectra can be rescaled by using the ``unit``
@@ -1240,6 +1243,9 @@ class imagecube(object):
             empirical_uncertainty (Optional[bool]): Whether to calculate the
                 uncertainty on the spectra empirically (``True``) or using the
                 statistical uncertainties.
+            statistic (Optional[str]): Statistic used to combine the shifted
+                pixels in each velocity bin when stacking, either ``'mean'``
+                (default) or ``'median'``.
 
         Returns:
             Four arrays. An array of the bin centers, ``rvals``, an array of
@@ -1348,7 +1354,8 @@ class imagecube(object):
                     vrot=v_kep[ridx],
                     vrad=v_rad[ridx],
                     resample=resample,
-                    scatter=True
+                    scatter=True,
+                    statistic=statistic
                     )
 
             # Complain if no spectra are found in the annulus.
@@ -1494,7 +1501,7 @@ class imagecube(object):
         dist=100., resample=1, beam_spacing=False, r_min=None, r_max=None,
         PA_min=None, PA_max=None, exclude_PA=False, abs_PA=False,
         mask_frame='disk', mask=None, velo_range=None, assume_correlated=True,
-        shadowed=False):
+        shadowed=False, statistic='mean'):
         """
         Generate a radial profile from shifted and stacked spectra. There are
         different ways to collapse the spectrum into a single value using the
@@ -1591,14 +1598,41 @@ class imagecube(object):
             shadowed (Optional[bool]): If ``True``, use a slower algorithm for
                 deprojecting the pixel coordinates into disk-center coordiantes
                 which can handle shadowed pixels.
+            assume_correlated (Optional[bool]): For 2D data only. If ``True``,
+                divide the azimuthal scatter by the square root of the number
+                of independent beams in each annulus.
+            statistic (Optional[str]): How to average the pixels in each
+                annulus. For 2D data this can be ``'mean'`` (default), with
+                the standard deviation as the uncertainty, ``'median'``, with
+                the standard deviation as the uncertainty, or
+                ``'percentiles'``, returning the median with asymmetric
+                uncertainties given by the 16th to 50th and 50th to 84th
+                percentile ranges. For 3D data this is the statistic used to
+                combine shifted pixels in each velocity bin when stacking,
+                either ``'mean'`` or ``'median'``.
+
+        .. note:
+
+            The meaning of the uncertainty differs between 2D and 3D data.
+            For 2D data it describes the azimuthal scatter of pixel values in
+            each annulus (optionally rescaled by the number of beams). For 3D
+            data it is the noise in the stacked spectrum, propagated through
+            the collapse into the requested ``unit``.
 
         Returns:
             Arrays of the bin centers in [arcsec], the profile value in the
-            requested units and the associated uncertainties.
+            requested units and the associated uncertainties. If
+            ``statistic='percentiles'``, the uncertainties have shape
+            ``(2, rvals.size)`` holding the lower and upper uncertainties,
+            suitable for the ``yerr`` argument of ``plt.errorbar``.
         """
 
         # If the data is only 2D, we assume this is either a moment map or a
         # continuum image and so can revert to the 2D approach.
+
+        if statistic not in ('mean', 'median', 'percentiles'):
+            raise ValueError("`statistic` must be 'mean', 'median' or " +
+                             "'percentiles'.")
 
         if self.data.ndim == 2:
             return self._radial_profile_2D(
@@ -1623,8 +1657,14 @@ class imagecube(object):
                 exclude_PA=exclude_PA,
                 mask_frame=mask_frame,
                 assume_correlated=assume_correlated,
-                shadowed=shadowed
+                shadowed=shadowed,
+                statistic=statistic
                 )
+
+        if statistic == 'percentiles':
+            raise NotImplementedError("`statistic='percentiles'` is only " +
+                                      "available for 2D data. Use 'mean' or " +
+                                      "'median' for 3D cubes.")
 
         # Otherwise we want to grab the shifted and stacked spectra over the
         # given range. We parse the desired unit into a flux component and a
@@ -1658,7 +1698,8 @@ class imagecube(object):
             abs_PA=abs_PA,
             mask_frame=mask_frame,
             mask=mask,
-            unit=_flux_unit, shadowed=shadowed
+            unit=_flux_unit, shadowed=shadowed,
+            statistic=statistic
             )
 
         # Cut down the spectra to the correct velocity range. Find the channels
@@ -1683,7 +1724,7 @@ class imagecube(object):
             profile = []
             for s_tmp in spectra:
                 mask = np.isfinite(s_tmp)
-                profile += [np.trapz(s_tmp[mask], v_tmp[mask])]
+                profile += [_trapz(s_tmp[mask], v_tmp[mask])]
             profile = np.squeeze(profile)
         else:
             profile = np.nanmax(spectra, axis=1)
@@ -1775,21 +1816,29 @@ class imagecube(object):
         y0=0.0, inc=0.0, PA=0.0, z0=None, psi=None, r_cavity=None, r_taper=None,
         q_taper=None, z_func=None, r_min=None, r_max=None, PA_min=None,
         PA_max=None, exclude_PA=False, abs_PA=False, mask_frame='disk',
-        assume_correlated=False, percentiles=False, shadowed=False):
+        assume_correlated=False, percentiles=False, shadowed=False,
+        statistic='mean'):
         """
         Returns the radial profile if `self.data.ndim == 2`, i.e., if shifting
         cannot be performed. Uses all the same parameters, but does not do any
-        of the shifting and ignores the units. If this is called directly then
-        there are several specific options.
+        of the shifting and ignores the units.
 
         Args:
-            percentiles (Optional[bool]): Use the 16th to 84th percentil of the
-                bin distribution to estimate uncertainties rather than the
-                standard deviation.
+            statistic (Optional[str]): Either ``'mean'``, ``'median'`` or
+                ``'percentiles'``. See ``radial_profile`` for details.
+            percentiles (Optional[bool]): Deprecated, equivalent to
+                ``statistic='percentiles'``.
 
         Returns:
-            Three 1D arrays with ``x``, ``y`` and ``dy`` for plotting.
+            Three arrays with ``x``, ``y`` and ``dy`` for plotting. If
+            ``statistic='percentiles'``, ``dy`` has shape ``(2, x.size)``.
         """
+
+        if percentiles:
+            statistic = 'percentiles'
+        if statistic not in ('mean', 'median', 'percentiles'):
+            raise ValueError("`statistic` must be 'mean', 'median' or " +
+                             "'percentiles'.")
 
         # Warning message.
 
@@ -1855,28 +1904,35 @@ class imagecube(object):
         if assume_correlated:
             nbeams = 2.0 * np.pi * rvals / self.bmaj
         else:
-            nbeams = 1.0
+            nbeams = np.ones(rvals.size)
 
-        # Radial binning.
+        # Radial binning. Remove any non-finite pixels so that they do not
+        # contaminate the statistics of the annulus.
 
         rpnts = rpnts[mask]
         toavg = self.data.flatten()[mask]
+        finite = np.isfinite(toavg)
+        rpnts, toavg = rpnts[finite], toavg[finite]
         ridxs = np.digitize(rpnts, rbins)
 
-        # Averaging.
+        # Averaging. Empty annuli return NaN.
 
-        if percentiles:
-            rstat = np.array([np.percentile(toavg[ridxs == r], [16, 50, 84])
-                              for r in range(1, rbins.size)]).T
-            ravgs = rstat[1]
-            rstds = np.array([rstat[1] - rstat[0], rstat[2] - rstat[1]])
-            rstds /= np.sqrt(nbeams)[None, :]
-        else:
-            ravgs = np.array([np.mean(toavg[ridxs == r])
-                              for r in range(1, rbins.size)])
-            rstds = np.array([np.std(toavg[ridxs == r])
-                              for r in range(1, rbins.size)])
-            rstds /= np.sqrt(nbeams)
+        def _stats(a):
+            if a.size == 0:
+                return np.nan, np.nan, np.nan
+            if statistic == 'mean':
+                return np.mean(a), np.std(a), np.std(a)
+            if statistic == 'median':
+                return np.median(a), np.std(a), np.std(a)
+            p16, p50, p84 = np.percentile(a, [16, 50, 84])
+            return p50, p50 - p16, p84 - p50
+
+        rstat = np.array([_stats(toavg[ridxs == r])
+                          for r in range(1, rbins.size)]).T
+        ravgs = rstat[0]
+        rstds = rstat[1:] / np.sqrt(nbeams)[None, :]
+        if statistic != 'percentiles':
+            rstds = rstds[0]
 
         return rvals, ravgs, rstds
 
@@ -2139,7 +2195,7 @@ class imagecube(object):
     def _integrated_SNR(self, x, y, dy, mask):
         """SNR based on the integrated spectrum."""
         y_tmp = np.where(np.logical_and(mask, np.isfinite(y)), y, 0.0)
-        return np.trapz(y_tmp, x=x) / np.nanmean(dy[~mask])
+        return _trapz(y_tmp, x=x) / np.nanmean(dy[~mask])
 
     def _peak_SNR(self, x, y, dy, mask):
         """SNR based on the peak of the spectrum."""
@@ -4010,10 +4066,10 @@ class imagecube(object):
         for i, r in enumerate(x):
             phi[i] = t_p - np.sign(r - r_p) * np.pi / 4. / m
             if r <= rmn:
-                phi[i] -= clockwise * np.trapz(y[i:idx_n+1][::-1],
+                phi[i] -= clockwise * _trapz(y[i:idx_n+1][::-1],
                                                x=x[i:idx_n+1][::-1])
             elif r >= rmp:
-                phi[i] -= clockwise * np.trapz(y[idx_p:i+1],
+                phi[i] -= clockwise * _trapz(y[idx_p:i+1],
                                                x=x[idx_p:i+1])
             else:
                 phi[i] = np.nan
